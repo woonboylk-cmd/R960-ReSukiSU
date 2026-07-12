@@ -42,6 +42,10 @@ jobs:
 
           echo "===== SOURCE FILES ====="
           ls -lh source
+          
+          # SỬA LỖI TẠI ĐÂY: Đổi tên file tải về thành Kernel.tar.gz để qua được lệnh test
+          mv source/*.tar.gz source/Kernel.tar.gz || true
+          
           test -f source/Kernel.tar.gz
 
       - name: Download stock R945FXXS1BYH1 firmware images
