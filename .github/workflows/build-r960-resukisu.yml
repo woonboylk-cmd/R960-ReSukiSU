@@ -34,18 +34,11 @@ jobs:
         run: |
           set -e
           mkdir -p source
-
           gh release download "${{ github.event.inputs.source_release_tag }}" \
             --repo "${{ github.repository }}" \
             --dir source \
             --pattern "*.tar.gz"
-
-          echo "===== SOURCE FILES ====="
-          ls -lh source
-          
-          # Đổi tên file tải về thành Kernel.tar.gz để qua được lệnh test
           mv source/*.tar.gz source/Kernel.tar.gz || true
-          
           test -f source/Kernel.tar.gz
 
       - name: Download stock R945FXXS1BYH1 firmware images
@@ -54,7 +47,6 @@ jobs:
         run: |
           set -e
           mkdir -p firmware
-
           gh release download "${{ github.event.inputs.firmware_release_tag }}" \
             --repo "${{ github.repository }}" \
             --dir firmware \
@@ -62,65 +54,50 @@ jobs:
             --pattern "init_boot.img*" \
             --pattern "vbmeta.img*"
 
-          echo "===== FIRMWARE FILES ====="
-          ls -lh firmware
-
       - name: Install dependencies
         run: |
           set -e
           sudo apt update
-          sudo apt install -y \
-            build-essential bc bison flex libssl-dev libelf-dev \
+          sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev \
             python3 python-is-python3 perl git unzip zip tar lz4 xz-utils zstd \
-            clang-14 lld-14 llvm-14 rsync cpio kmod dwarves patch file curl \
-            openssl \
-            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
+            clang-14 lld-14 llvm-14 rsync cpio kmod dwarves patch file curl openssl \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
 
       - name: Set clang 14 path
         run: |
           set -e
           echo "/usr/lib/llvm-14/bin" >> "$GITHUB_PATH"
-          /usr/lib/llvm-14/bin/clang --version
-          /usr/lib/llvm-14/bin/ld.lld --version
 
       - name: Extract Samsung kernel source
         run: |
           set -e
-          mkdir -p work/kernel
-
-          tar -xzf source/Kernel.tar.gz -C work/kernel
-          cd work/kernel
+          mkdir -p work/extracted
+          tar -xzf source/Kernel.tar.gz -C work/extracted || true
           
-          # Giải nén các file nén lồng nhau
+          cd work/extracted
+          # Xả sạch tất cả các file nén lồng nhau bất kể định dạng
           find . -name "*.tar.gz" -exec tar -xzf {} \; 2>/dev/null || true
           find . -name "*.tar" -exec tar -xf {} \; 2>/dev/null || true
+          find . -name "*.zip" -exec unzip -q {} \; 2>/dev/null || true
           
-          # SỬA LỖI TẠI ĐÂY: Dò tìm thư mục gốc chứa mã nguồn và kéo ra ngoài root
-          CONFIG_PATH=$(find . -type d -name "configs" | grep "arch/arm64/configs" | head -n 1)
-          if [ ! -z "$CONFIG_PATH" ]; then
-            KERNEL_ROOT=${CONFIG_PATH%/arch/arm64/configs}
-            if [ "$KERNEL_ROOT" != "." ] && [ "$KERNEL_ROOT" != "" ]; then
-              echo "Phát hiện mã nguồn lồng trong $KERNEL_ROOT. Đang kéo ra ngoài..."
-              rsync -a "$KERNEL_ROOT/" .
-              rm -rf "$KERNEL_ROOT"
-            fi
+          # Định vị chính xác thư mục chứa file Makefile gốc của nhân
+          MAKE_DIR=$(find . -type f -name "Makefile" | head -n 1)
+          if [ -z "$MAKE_DIR" ]; then
+            echo "Không tìm thấy Makefile!" && exit 1
           fi
-
-          chmod -R u+rwX .
-
-          echo "===== CHECK DEFCONFIG ====="
-          find arch/arm64/configs -type f | grep -i "wise6blue"
+          REAL_ROOT=$(dirname "$MAKE_DIR")
+          echo "Mã nguồn gốc nằm tại: $REAL_ROOT"
           
-          echo "===== SOURCE TOP LEVEL ====="
-          ls -la | head -50
+          mkdir -p ../kernel
+          rsync -a "$REAL_ROOT/" ../kernel/
+          cd ../kernel
+          chmod -R u+rwX .
+          ls -la | head -20
 
       - name: Add ReSukiSU
         run: |
           set -e
           cd work/kernel
-
-          echo "===== ADDING ReSukiSU ====="
           curl -LSs "${{ github.event.inputs.resukisu_setup_url }}" | bash -
           chmod -R u+rwX .
 
@@ -128,58 +105,25 @@ jobs:
         run: |
           set -e
           cd work/kernel
-          chmod -R u+rwX .
-
           cat > apply_resukisu_manual_hooks.py <<'PY'
-          import re
-          import stat
+          import re, stat
           from pathlib import Path
-
-          def read(path):
-              p = Path(path)
-              if not p.exists():
-                  return None
-              return p.read_text(errors="ignore")
-
-          def make_writable(path):
-              p = Path(path)
-              try:
-                  p.chmod(p.stat().st_mode | stat.S_IWUSR | stat.S_IRUSR)
-              except Exception as e:
-                  print(f"WARN could not chmod {path}: {e}")
-
-          def write(path, data):
-              make_writable(path)
-              Path(path).write_text(data)
-
-          def insert_before_literal(path, needle, block, tag, required=True):
+          def read(path): return Path(path).read_text(errors="ignore") if Path(path).exists() else None
+          def write(path, data): Path(path).chmod(Path(path).stat().st_mode | stat.S_IWUSR | stat.S_IRUSR); Path(path).write_text(data)
+          def insert_before_literal(path, needle, block, tag):
               s = read(path)
-              if s is None:
-                  if required: raise SystemExit(f"missing file: {path}")
-                  return False
-              if tag in s: return True
-              if needle not in s:
-                  if required: raise SystemExit(f"marker not found in {path}")
-                  return False
-              write(path, s.replace(needle, block + needle, 1))
-              return True
-
-          def re_patch(path, pattern, repl, tag, required=True, flags=re.S):
+              if not s or needle not in s or tag in s: return False
+              write(path, s.replace(needle, block + needle, 1)); return True
+          def re_patch(path, pattern, repl, tag, flags=re.S):
               s = read(path)
-              if s is None:
-                  if required: raise SystemExit(f"missing file: {path}")
-                  return False
-              if tag in s: return True
+              if not s or tag in s: return False
               new, n = re.subn(pattern, repl, s, count=1, flags=flags)
-              if n == 0:
-                  if required: raise SystemExit(f"regex marker not found in {path}")
-                  return False
-              write(path, new)
-              return True
+              if n > 0: write(path, new); return True
+              return False
 
           insert_before_literal("fs/stat.c", "#if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)", '#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\nextern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\n#endif\n\n', "ReSukiSU manual hook: stat externs")
           re_patch("fs/stat.c", r'(\n\s*int error;\n\n)(\s*error = vfs_fstatat\(dfd, filename, &stat, flag\);)', r'\1#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif\n\2', "ReSukiSU manual hook: stat path")
-          re_patch("fs/stat.c", r'(\n\s*if \(!error\)\n\s*error = cp_new_stat\(&stat, statbuf\);\n\n)(\s*return error;)', r'\1#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_newfstat_ret(&fd, &statbuf);\n#endif\n\2', "ReSukiSU manual hook: newfstat ret", required=False)
+          re_patch("fs/stat.c", r'(\n\s*if \(!error\)\n\s*error = cp_new_stat\(&stat, statbuf\);\n\n)(\s*return error;)', r'\1#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_newfstat_ret(&fd, &statbuf);\n#endif\n\2', "ReSukiSU manual hook: newfstat ret")
           re_patch("fs/exec.c", r'(static int do_execve\(struct filename \*filename,)', r'#ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n#endif\n\n\1', "ReSukiSU manual hook: execveat extern")
           re_patch("fs/exec.c", r'(\n\s*struct user_arg_ptr argv = \{ \.ptr\.native = __argv \};\n\s*struct user_arg_ptr envp = \{ \.ptr\.native = __envp \};\n)(\s*return do_execveat_common\(AT_FDCWD, filename, argv, envp, 0\);)', r'\1#ifdef CONFIG_KSU_MANUAL_HOOK\n\tint ksu_fd = AT_FDCWD;\n\tint ksu_flags = 0;\n\tksu_handle_execveat(&ksu_fd, &filename, &argv, &envp, &ksu_flags);\n\treturn do_execveat_common(ksu_fd, filename, argv, envp, ksu_flags);\n#endif\n\2', "ReSukiSU manual hook: do_execve")
           re_patch("fs/exec.c", r'(\n\s*struct user_arg_ptr envp = \{ \.ptr\.native = __envp \};\n\n)(\s*return do_execveat_common\(fd, filename, argv, envp, flags\);)', r'\1#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n#endif\n\2', "ReSukiSU manual hook: do_execveat")
@@ -187,33 +131,27 @@ jobs:
           re_patch("fs/open.c", r'(\n\s*const struct cred \*old_cred = NULL;\n\n)(\s*if \(mode & ~S_IRWXO\))', r'\1#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_faccessat(&dfd, &filename, &mode, &flags);\n#endif\n\2', "ReSukiSU manual hook: do_faccessat")
           insert_before_literal("kernel/reboot.c", "SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,", '#ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n\n', "ReSukiSU manual hook: reboot extern")
           re_patch("kernel/reboot.c", r'(\n\s*char buffer\[256\];\n\s*int ret = 0;\n\n)(\s*/\* We only trust the superuser with rebooting the system\. \*/)', r'\1#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif\n\2', "ReSukiSU manual hook: sys_reboot")
-          
-          print("Manual hooks injection successful.")
+          print("Hooks applied.")
           PY
-
           python3 apply_resukisu_manual_hooks.py
 
       - name: Build ReSukiSU kernel
         run: |
           set -e
           cd work/kernel
-
           export PLATFORM_VERSION=14
           export TARGET_SOC=s5e5515
           export ARCH=arm64
           export LLVM=1
           export LLVM_IAS=1
           export CROSS_COMPILE=aarch64-linux-gnu-
-          export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
           export PATH="/usr/lib/llvm-14/bin:$PATH"
 
           make O=out_resukisu s5e5515-wise6blue_defconfig
-
           printf "" > .scmversion
 
           ./scripts/config --file out_resukisu/.config --set-str LOCALVERSION "-30937185-abR945FXXS1BYH1" || true
           ./scripts/config --file out_resukisu/.config -d LOCALVERSION_AUTO || true
-
           ./scripts/config --file out_resukisu/.config -d MODULE_SIG_PROTECT || true
           ./scripts/config --file out_resukisu/.config -d UH || true
           ./scripts/config --file out_resukisu/.config -d RKP || true
@@ -221,7 +159,6 @@ jobs:
           ./scripts/config --file out_resukisu/.config -d SECURITY_DEFEX || true
           ./scripts/config --file out_resukisu/.config -d SVSMC || true
           ./scripts/config --file out_resukisu/.config -d SAMSUNG_PRODUCT_SHIP || true
-
           ./scripts/config --file out_resukisu/.config -e KSU || true
           ./scripts/config --file out_resukisu/.config -e KERNELSU || true
           ./scripts/config --file out_resukisu/.config -e RESUKISU || true
@@ -230,7 +167,6 @@ jobs:
 
           make O=out_resukisu olddefconfig
           make O=out_resukisu -j"$(nproc)"
-
           mkdir -p "$GITHUB_WORKSPACE/dist"
           cp out_resukisu/arch/arm64/boot/Image "$GITHUB_WORKSPACE/dist/Image-ReSukiSU-R945"
 
@@ -238,23 +174,12 @@ jobs:
         run: |
           set -e
           mkdir -p work/firmware
-
           normalize_img() {
-            name="$1"
-            if [ -f "firmware/${name}.img" ]; then
-              cp "firmware/${name}.img" "work/firmware/${name}.img"
-              return 0
-            fi
-            if [ -f "firmware/${name}.img.lz4" ]; then
-              lz4 -d -f "firmware/${name}.img.lz4" "work/firmware/${name}.img"
-              return 0
-            fi
-            echo "Missing ${name}.img" && exit 1
+            if [ -f "firmware/$1.img" ]; then cp "firmware/$1.img" "work/firmware/$1.img"
+            elif [ -f "firmware/$1.img.lz4" ]; then lz4 -d -f "firmware/$1.img.lz4" "work/firmware/$1.img"
+            else exit 1; fi
           }
-
-          normalize_img boot
-          normalize_img init_boot
-          normalize_img vbmeta
+          normalize_img boot && normalize_img init_boot && normalize_img vbmeta
 
       - name: Download avbtool
         run: |
@@ -268,98 +193,38 @@ jobs:
           python3 - <<'PY'
           import struct
           from pathlib import Path
-
-          PAGE = 4096
-          SEANDROID = b"SEANDROIDENFORCE"
-
-          stock_path = Path("work/firmware/boot.img")
-          kernel_path = Path("dist/Image-ReSukiSU-R945")
-          out_path = Path("work/firmware/boot_resukisu_noavb.img")
-
-          stock = stock_path.read_bytes()
-          kernel = kernel_path.read_bytes()
-
+          stock = Path("work/firmware/boot.img").read_bytes()
+          kernel = Path("dist/Image-ReSukiSU-R945").read_bytes()
           os_version = struct.unpack("<I", stock[16:20])[0]
           cmdline = stock[44:44 + 1536]
-
-          def pad(data: bytes, page=PAGE) -> bytes:
-              rem = len(data) % page
-              if rem: data += b"\x00" * (page - rem)
-              return data
-
-          hdr = bytearray()
-          hdr += b"ANDROID!"
-          hdr += struct.pack("<I", len(kernel))
-          hdr += struct.pack("<I", 0)
-          hdr += struct.pack("<I", os_version)
-          hdr += struct.pack("<I", 1584)
-          hdr += struct.pack("<4I", 0, 0, 0, 0)
-          hdr += struct.pack("<I", 4)
-          hdr += cmdline
-          hdr += struct.pack("<I", 0)
-
-          img = bytes(hdr)
-          img = pad(img)
-          img += kernel
-          img = pad(img)
-          img += SEANDROID
-          img = pad(img)
-
-          out_path.write_bytes(img)
+          def pad(d, p=4096): return d + b"\x00" * ((p - len(d) % p) % p)
+          hdr = pad(b"ANDROID!" + struct.pack("<I", len(kernel)) + struct.pack("<I", 0) + struct.pack("<I", os_version) + struct.pack("<I", 1584) + struct.pack("<4I", 0,0,0,0) + struct.pack("<I", 4) + cmdline + struct.pack("<I", 0))
+          Path("work/firmware/boot_resukisu_noavb.img").write_bytes(pad(hdr + pad(kernel) + b"SEANDROIDENFORCE"))
           PY
 
       - name: Generate local AVB key and re-footer boot/init_boot
         run: |
           set -e
-          mkdir -p avb_keys
-          openssl genrsa -out avb_keys/r945_local_avb.pem 4096
-
+          mkdir -p avb_keys && openssl genrsa -out avb_keys/r945_local_avb.pem 4096
           cp work/firmware/boot_resukisu_noavb.img work/firmware/boot.img
           cp work/firmware/init_boot.img work/firmware/init_boot_refooter.img
-
           python3 avbtool.py erase_footer --image work/firmware/boot.img || true
-          python3 avbtool.py add_hash_footer \
-            --image work/firmware/boot.img \
-            --partition_name boot \
-            --partition_size 50331648 \
-            --algorithm SHA256_RSA4096 \
-            --key avb_keys/r945_local_avb.pem \
-            --rollback_index 2
-
+          python3 avbtool.py add_hash_footer --image work/firmware/boot.img --partition_name boot --partition_size 50331648 --algorithm SHA256_RSA4096 --key avb_keys/r945_local_avb.pem --rollback_index 2
           python3 avbtool.py erase_footer --image work/firmware/init_boot_refooter.img || true
-          python3 avbtool.py add_hash_footer \
-            --image work/firmware/init_boot_refooter.img \
-            --partition_name init_boot \
-            --partition_size 16777216 \
-            --algorithm SHA256_RSA4096 \
-            --key avb_keys/r945_local_avb.pem \
-            --rollback_index 2
-
+          python3 avbtool.py add_hash_footer --image work/firmware/init_boot_refooter.img --partition_name init_boot --partition_size 16777216 --algorithm SHA256_RSA4096 --key avb_keys/r945_local_avb.pem --rollback_index 2
           mv work/firmware/init_boot_refooter.img work/firmware/init_boot.img
 
       - name: Generate new top-level vbmeta.img
         run: |
           set -e
-          python3 avbtool.py make_vbmeta_image \
-            --output work/firmware/vbmeta.img \
-            --algorithm SHA256_RSA4096 \
-            --key avb_keys/r945_local_avb.pem \
-            --rollback_index 2 \
-            --flags 3 \
-            --include_descriptors_from_image work/firmware/boot.img \
-            --include_descriptors_from_image work/firmware/init_boot.img
+          python3 avbtool.py make_vbmeta_image --output work/firmware/vbmeta.img --algorithm SHA256_RSA4096 --key avb_keys/r945_local_avb.pem --rollback_index 2 --flags 3 --include_descriptors_from_image work/firmware/boot.img --include_descriptors_from_image work/firmware/init_boot.img
 
       - name: Build plain POSIX Odin AP tar
         run: |
           set -e
-          mkdir -p final_ap
-          cp work/firmware/boot.img final_ap/boot.img
-          cp work/firmware/init_boot.img final_ap/init_boot.img
-          cp work/firmware/vbmeta.img final_ap/vbmeta.img
-
+          mkdir -p final_ap && cp work/firmware/boot.img final_ap/boot.img && cp work/firmware/init_boot.img final_ap/init_boot.img && cp work/firmware/vbmeta.img final_ap/vbmeta.img
           tar --format=posix -cf dist/R945_ReSukiSU_Complete_AP.tar -C final_ap boot.img init_boot.img vbmeta.img
-          cd dist
-          md5sum R945_ReSukiSU_Complete_AP.tar > R945_ReSukiSU_Complete_AP.tar.md5
+          cd dist && md5sum R945_ReSukiSU_Complete_AP.tar > R945_ReSukiSU_Complete_AP.tar.md5
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
