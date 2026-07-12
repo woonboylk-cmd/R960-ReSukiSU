@@ -440,7 +440,7 @@ jobs:
           export PATH="/usr/lib/llvm-14/bin:$PATH"
 
           # SỬA LỖI ĐÂY NÀY: Dùng đúng file defconfig của mã bo mạch fresh6ul
-          make O=out_resukisu s5e5515-fresh6ul_defconfig
+          make O=out_resukisu s5e5515-fresh6bsue_defconfig
 
           printf "" > .scmversion
 
