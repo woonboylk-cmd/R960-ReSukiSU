@@ -697,7 +697,7 @@ jobs:
           cp work/firmware/init_boot.img final_ap/init_boot.img
           cp work/firmware/vbmeta.img final_ap/vbmeta.img
 
-          tar --format=posix -cf dist/R945_ReSukiSU_Complete_AP.tar -C final_ap boot.img init_boot.img vbmeta.img
+          tar --format=ustar -cf dist/R945_ReSukiSU_Complete_AP.tar -C final_ap boot.img init_boot.img vbmeta.img
 
           cp dist/R945_ReSukiSU_Complete_AP.tar dist/R945_ReSukiSU_Complete_AP.tar.md5
           md5sum dist/R945_ReSukiSU_Complete_AP.tar >> dist/R945_ReSukiSU_Complete_AP.tar.md5
@@ -752,6 +752,7 @@ jobs:
             dist/resukisu.config
             dist/SHA256SUMS.txt
             dist/RELEASE_NOTES.txt
+
 
 
 
