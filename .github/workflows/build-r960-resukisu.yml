@@ -8,11 +8,11 @@ on:
         required: true
         default: "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh"
       source_release_tag:
-        description: "Release tag chứa file nén Kernel mã nguồn (VD: R945FXXS1BYH1_kernel.tar.gz)"
+        description: "Release tag containing Kernel.tar.gz and R945FXXS1BYH1_kernel.tar.gz"
         required: true
         default: "source-tarballs"
       firmware_release_tag:
-        description: "Release tag chứa boot.img, init_boot.img, vbmeta.img gốc"
+        description: "Release tag containing boot.img, init_boot.img, vbmeta.img"
         required: true
         default: "firmware-r945-byh1"
 
@@ -42,13 +42,9 @@ jobs:
 
           echo "===== SOURCE FILES ====="
           ls -lh source
-          
-          # Đảm bảo file tar.gz đã được tải xuống thành công
-          FILE_COUNT=$(ls source/*.tar.gz 2>/dev/null | wc -l)
-          if [ "$FILE_COUNT" -eq 0 ]; then
-            echo "Lỗi: Không tìm thấy file .tar.gz nào trong Release!"
-            exit 1
-          fi
+
+          test -f source/Kernel.tar.gz
+          test -f source/R945FXXS1BYH1_kernel.tar.gz
 
       - name: Download stock R945FXXS1BYH1 firmware images
         env:
@@ -92,16 +88,13 @@ jobs:
 
           mkdir -p work/kernel
 
-          # Dùng đúng logic của tác giả gốc: giải nén và cắt bỏ thư mục bọc ngoài cùng (strip-components=1)
-          TARBALL=$(ls source/*.tar.gz | head -n 1)
-          tar -xzf "$TARBALL" -C work/kernel --strip-components=1
+          tar -xzf source/Kernel.tar.gz -C work/kernel
+          tar -xzf source/R945FXXS1BYH1_kernel.tar.gz -C work/kernel --strip-components=1
 
-          # Samsung source tarballs can preserve read-only modes.
-          # Make the tree writable before ReSukiSU/manual patches edit files.
           chmod -R u+rwX work/kernel
 
           echo "===== CHECK DEFCONFIG ====="
-          find work/kernel/arch/arm64/configs -type f | grep -i "wise6blue"
+          find work/kernel/arch/arm64/configs -type f | grep -i "fresh"
 
           echo "===== SOURCE TOP LEVEL ====="
           ls -la work/kernel | head -50
@@ -115,7 +108,6 @@ jobs:
           echo "===== ADDING ReSukiSU ====="
           curl -LSs "${{ github.event.inputs.resukisu_setup_url }}" | bash -
 
-          # Make sure setup-added and source files are writable for manual hook patching.
           chmod -R u+rwX .
 
           echo "===== ReSukiSU FILE CHECK ====="
@@ -154,22 +146,17 @@ jobs:
               s = read(path)
               if s is None:
                   msg = f"missing file: {path}"
-                  if required:
-                      raise SystemExit(msg)
+                  if required: raise SystemExit(msg)
                   print("optional skip:", msg)
                   return False
-
               if tag in s:
                   print(f"already patched: {path} [{tag}]")
                   return True
-
               if needle not in s:
                   msg = f"marker not found in {path}: {needle!r}"
-                  if required:
-                      raise SystemExit(msg)
+                  if required: raise SystemExit(msg)
                   print("optional skip:", msg)
                   return False
-
               write(path, s.replace(needle, block + needle, 1))
               print(f"patched: {path} [{tag}]")
               return True
@@ -178,22 +165,17 @@ jobs:
               s = read(path)
               if s is None:
                   msg = f"missing file: {path}"
-                  if required:
-                      raise SystemExit(msg)
+                  if required: raise SystemExit(msg)
                   print("optional skip:", msg)
                   return False
-
               if tag in s:
                   print(f"already patched: {path} [{tag}]")
                   return True
-
               if old not in s:
                   msg = f"marker not found in {path}: {old[:120]!r}"
-                  if required:
-                      raise SystemExit(msg)
+                  if required: raise SystemExit(msg)
                   print("optional skip:", msg)
                   return False
-
               write(path, s.replace(old, new, 1))
               print(f"patched: {path} [{tag}]")
               return True
@@ -202,28 +184,21 @@ jobs:
               s = read(path)
               if s is None:
                   msg = f"missing file: {path}"
-                  if required:
-                      raise SystemExit(msg)
+                  if required: raise SystemExit(msg)
                   print("optional skip:", msg)
                   return False
-
               if tag in s:
                   print(f"already patched: {path} [{tag}]")
                   return True
-
               new, n = re.subn(pattern, repl, s, count=1, flags=flags)
               if n == 0:
                   msg = f"regex marker not found in {path}: {pattern[:120]!r}"
-                  if required:
-                      raise SystemExit(msg)
+                  if required: raise SystemExit(msg)
                   print("optional skip:", msg)
                   return False
-
               write(path, new)
               print(f"patched: {path} [{tag}]")
               return True
-
-          # Required documented manual hooks: stat, execve/execveat, faccessat, reboot.
 
           insert_before_literal(
               "fs/stat.c",
@@ -261,14 +236,6 @@ jobs:
               "ReSukiSU manual hook: newfstat ret",
               required=False,
           )
-
-          # NOTE:
-          # Do NOT blindly inject ksu_handle_fstat64_ret() here.
-          # Samsung's fs/stat.c has cp_new_stat64() paths where the syscall
-          # variable is dfd, not fd, which caused:
-          #   fs/stat.c: error: use of undeclared identifier 'fd'
-          # The core required stat hook above is kept; fstat64-ret is skipped
-          # unless you hand-patch the exact SYSCALL_DEFINE2(fstat64) body.
 
           re_patch(
               "fs/exec.c",
@@ -355,8 +322,6 @@ jobs:
               required=True,
           )
 
-          # Optional documented/related hooks. Best-effort only.
-
           insert_before_literal(
               "drivers/input/input.c",
               "void input_event(struct input_dev *dev,",
@@ -424,7 +389,6 @@ jobs:
               required=False,
           )
 
-          # Optional SELinux exports.
           replace_literal(
               "security/selinux/ss/services.c",
               "static DEFINE_RWLOCK(policy_rwlock);",
@@ -475,7 +439,8 @@ jobs:
           export KBUILD_BUILD_HOST=SWDM8407
           export PATH="/usr/lib/llvm-14/bin:$PATH"
 
-          make O=out_resukisu s5e5515-wise6blue_defconfig
+          # SỬA LỖI ĐÂY NÀY: Dùng đúng file defconfig của mã bo mạch fresh6ul
+          make O=out_resukisu s5e5515-fresh6ul_defconfig
 
           printf "" > .scmversion
 
@@ -782,6 +747,7 @@ jobs:
           Target firmware:
           - R945FXXS1BYH1
           - Android 14
+          - Security patch 2025-08-01
           - Rollback index 2
 
           Package contents:
