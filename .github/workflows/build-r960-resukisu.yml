@@ -43,7 +43,7 @@ jobs:
           echo "===== SOURCE FILES ====="
           ls -lh source
           
-          # SỬA LỖI TẠI ĐÂY: Đổi tên file tải về thành Kernel.tar.gz để qua được lệnh test
+          # Đổi tên file tải về thành Kernel.tar.gz để qua được lệnh test
           mv source/*.tar.gz source/Kernel.tar.gz || true
           
           test -f source/Kernel.tar.gz
@@ -91,12 +91,29 @@ jobs:
 
           tar -xzf source/Kernel.tar.gz -C work/kernel
           cd work/kernel
+          
+          # Giải nén các file nén lồng nhau
           find . -name "*.tar.gz" -exec tar -xzf {} \; 2>/dev/null || true
           find . -name "*.tar" -exec tar -xf {} \; 2>/dev/null || true
+          
+          # SỬA LỖI TẠI ĐÂY: Dò tìm thư mục gốc chứa mã nguồn và kéo ra ngoài root
+          CONFIG_PATH=$(find . -type d -name "configs" | grep "arch/arm64/configs" | head -n 1)
+          if [ ! -z "$CONFIG_PATH" ]; then
+            KERNEL_ROOT=${CONFIG_PATH%/arch/arm64/configs}
+            if [ "$KERNEL_ROOT" != "." ] && [ "$KERNEL_ROOT" != "" ]; then
+              echo "Phát hiện mã nguồn lồng trong $KERNEL_ROOT. Đang kéo ra ngoài..."
+              rsync -a "$KERNEL_ROOT/" .
+              rm -rf "$KERNEL_ROOT"
+            fi
+          fi
+
           chmod -R u+rwX .
 
           echo "===== CHECK DEFCONFIG ====="
           find arch/arm64/configs -type f | grep -i "wise6blue"
+          
+          echo "===== SOURCE TOP LEVEL ====="
+          ls -la | head -50
 
       - name: Add ReSukiSU
         run: |
@@ -181,7 +198,6 @@ jobs:
           set -e
           cd work/kernel
 
-          # KHỚP LỆNH: Khai báo chính xác Android 14 dựa theo ro.build.version.release của bạn
           export PLATFORM_VERSION=14
           export TARGET_SOC=s5e5515
           export ARCH=arm64
@@ -195,11 +211,9 @@ jobs:
 
           printf "" > .scmversion
 
-          # KHỚP LỆNH: Nạp cứng chuỗi LOCALVERSION thực tế thu thập từ ADB để lách vermagic check
           ./scripts/config --file out_resukisu/.config --set-str LOCALVERSION "-30937185-abR945FXXS1BYH1" || true
           ./scripts/config --file out_resukisu/.config -d LOCALVERSION_AUTO || true
 
-          # Vô hiệu hóa bảo vệ hệ thống của Samsung
           ./scripts/config --file out_resukisu/.config -d MODULE_SIG_PROTECT || true
           ./scripts/config --file out_resukisu/.config -d UH || true
           ./scripts/config --file out_resukisu/.config -d RKP || true
@@ -208,7 +222,6 @@ jobs:
           ./scripts/config --file out_resukisu/.config -d SVSMC || true
           ./scripts/config --file out_resukisu/.config -d SAMSUNG_PRODUCT_SHIP || true
 
-          # Cấu hình cờ Root tầng nhân
           ./scripts/config --file out_resukisu/.config -e KSU || true
           ./scripts/config --file out_resukisu/.config -e KERNELSU || true
           ./scripts/config --file out_resukisu/.config -e RESUKISU || true
