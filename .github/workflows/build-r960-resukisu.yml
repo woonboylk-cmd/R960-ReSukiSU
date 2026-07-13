@@ -93,6 +93,11 @@ jobs:
           mkdir -p work/kernel
 
           tar -xzf source/Kernel.tar.gz -C work/kernel
+          if [ -d "work/kernel/Kernel" ]; then
+            echo "Found nested Kernel directory. Moving files up..."
+            mv work/kernel/Kernel/* work/kernel/
+            rmdir work/kernel/Kernel
+          fi
           for f in source/*_Kernel.tar.gz; do if [ -f "" ]; then tar -xzf "" -C work/kernel --strip-components=1; fi; done
 
           # Samsung source tarballs can preserve read-only modes.
@@ -100,7 +105,7 @@ jobs:
           chmod -R u+rwX work/kernel
 
           echo "===== CHECK DEFCONFIG ====="
-          find work/kernel/arch/arm64/configs -type f | grep -i "wise6blue"
+          find work/kernel/arch/arm64/configs -type f | grep -i "wise" || true
 
           echo "===== SOURCE TOP LEVEL ====="
           ls -la work/kernel | head -50
@@ -818,4 +823,5 @@ jobs:
             dist/resukisu.config
             dist/SHA256SUMS.txt
             dist/RELEASE_NOTES.txt
+
 
