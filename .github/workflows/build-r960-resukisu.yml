@@ -479,7 +479,14 @@ jobs:
           export KBUILD_BUILD_HOST=VPHORC629
           export PATH="/usr/lib/llvm-14/bin:$PATH"
 
-          make O=out_resukisu s5e5515-wise6blue_defconfig
+          export TARGET_DEFCONFIG=$(ls arch/arm64/configs | grep -E "wise|fresh|s5e5515" | head -n 1 || true)
+          if [ -z "$TARGET_DEFCONFIG" ]; then
+            echo "ERROR: No suitable defconfig found!"
+            ls arch/arm64/configs
+            exit 1
+          fi
+          echo "Using defconfig: $TARGET_DEFCONFIG"
+          make O=out_resukisu $TARGET_DEFCONFIG
 
           printf "" > .scmversion
 
@@ -823,5 +830,6 @@ jobs:
             dist/resukisu.config
             dist/SHA256SUMS.txt
             dist/RELEASE_NOTES.txt
+
 
 
