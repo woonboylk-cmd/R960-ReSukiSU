@@ -1,4 +1,4 @@
-name: Build SM-R945 ReSukiSU AP Complete
+name: Build SM-R945F ReSukiSU AP Complete
 
 on:
   workflow_dispatch:
@@ -8,20 +8,24 @@ on:
         required: true
         default: "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh"
       source_release_tag:
-        description: "Release tag containing Kernel.tar.gz and R945FXXS1BYH1_Kernel.tar.gz"
+        description: "Release tag containing Kernel.tar.gz and R960XXU1CYK2_Kernel.tar.gz"
         required: true
         default: "source-tarballs"
       firmware_release_tag:
         description: "Release tag containing boot.img.lz4, init_boot.img.lz4, vbmeta.img.lz4"
         required: true
-        default: "firmware-r945-byh1"
+        default: "firmware-r945-czf5"
+      spoofed_vermagic:
+        description: "The Target Vermagic to Spoof (CZF5)"
+        required: true
+        default: "-33003255-abR945FXXS2CZF5"
 
 permissions:
   contents: write
 
 jobs:
   build:
-    name: Build SM-R945 ReSukiSU AP Complete
+    name: Build SM-R945F ReSukiSU AP Complete
     runs-on: ubuntu-22.04
 
     steps:
@@ -44,8 +48,9 @@ jobs:
           ls -lh source
 
           test -f source/Kernel.tar.gz
+          ls source/*_Kernel.tar.gz 2>/dev/null || true
 
-      - name: Download stock R945FXXS1BYH1 firmware images
+      - name: Download stock R945FXXS2CZF5 firmware images
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -88,13 +93,14 @@ jobs:
           mkdir -p work/kernel
 
           tar -xzf source/Kernel.tar.gz -C work/kernel
+          for f in source/*_Kernel.tar.gz; do if [ -f "" ]; then tar -xzf "" -C work/kernel --strip-components=1; fi; done
 
           # Samsung source tarballs can preserve read-only modes.
           # Make the tree writable before ReSukiSU/manual patches edit files.
           chmod -R u+rwX work/kernel
 
           echo "===== CHECK DEFCONFIG ====="
-          find work/kernel/arch/arm64/configs -type f | grep -i "fresh6bsue"
+          find work/kernel/arch/arm64/configs -type f | grep -i "wise6blue"
 
           echo "===== SOURCE TOP LEVEL ====="
           ls -la work/kernel | head -50
@@ -457,7 +463,7 @@ jobs:
 
           cd work/kernel
 
-          export PLATFORM_VERSION=14
+          export PLATFORM_VERSION=16
           export TARGET_SOC=s5e5515
           export ARCH=arm64
           export LLVM=1
@@ -468,11 +474,11 @@ jobs:
           export KBUILD_BUILD_HOST=VPHORC629
           export PATH="/usr/lib/llvm-14/bin:$PATH"
 
-          make O=out_resukisu s5e5515-fresh6bsue_defconfig
+          make O=out_resukisu s5e5515-wise6blue_defconfig
 
           printf "" > .scmversion
 
-          ./scripts/config --file out_resukisu/.config --set-str LOCALVERSION "-33003255-abR945FXXS1BYH1" || true
+          ./scripts/config --file out_resukisu/.config --set-str LOCALVERSION "${{ github.event.inputs.spoofed_vermagic }}" || true
           ./scripts/config --file out_resukisu/.config -d LOCALVERSION_AUTO || true
 
           # Disable Samsung/custom-kernel blockers if present.
@@ -525,11 +531,11 @@ jobs:
           make O=out_resukisu -j"$(nproc)"
 
           mkdir -p "$GITHUB_WORKSPACE/dist"
-          cp out_resukisu/arch/arm64/boot/Image "$GITHUB_WORKSPACE/dist/Image-ReSukiSU-R945"
+          cp out_resukisu/arch/arm64/boot/Image "$GITHUB_WORKSPACE/dist/Image-ReSukiSU-R945F"
           cp out_resukisu/.config "$GITHUB_WORKSPACE/dist/resukisu.config"
 
           echo "===== BUILT KERNEL IMAGE ====="
-          ls -lh "$GITHUB_WORKSPACE/dist/Image-ReSukiSU-R945"
+          ls -lh "$GITHUB_WORKSPACE/dist/Image-ReSukiSU-R945F"
 
       - name: Prepare stock firmware images
         run: |
@@ -614,19 +620,79 @@ jobs:
         run: |
           set -e
 
-          echo "===== REPACKING BOOT IMAGE ====="
-          # For R945F, Samsung's arch/arm64/boot/Image is ALREADY a boot.img
-          # Do not wrap it in a second ANDROID! header.
-          cp dist/Image-ReSukiSU-R945 work/firmware/boot_resukisu_noavb.img
+          cat > repack_boot_v4.py <<'PY'
+          import struct
+          from pathlib import Path
 
-          # Append SEANDROIDENFORCE footer
-          printf "SEANDROIDENFORCE" >> work/firmware/boot_resukisu_noavb.img
+          PAGE = 4096
+          SEANDROID = b"SEANDROIDENFORCE"
 
-          # Pad the image to 4096-byte boundary
-          truncate -s %4096 work/firmware/boot_resukisu_noavb.img
+          stock_path = Path("work/firmware/boot.img")
+          kernel_path = Path("dist/Image-ReSukiSU-R945F")
+          out_path = Path("work/firmware/boot_resukisu_noavb.img")
 
-          echo "Wrote: work/firmware/boot_resukisu_noavb.img"
-          ls -lh work/firmware/boot_resukisu_noavb.img
+          stock = stock_path.read_bytes()
+          kernel = kernel_path.read_bytes()
+
+          if stock[:8] != b"ANDROID!":
+              raise SystemExit("stock boot.img is not an Android boot image")
+
+          old_kernel_size = struct.unpack("<I", stock[8:12])[0]
+          ramdisk_size = struct.unpack("<I", stock[12:16])[0]
+          os_version = struct.unpack("<I", stock[16:20])[0]
+          header_size = struct.unpack("<I", stock[20:24])[0]
+          header_version = struct.unpack("<I", stock[40:44])[0]
+          cmdline = stock[44:44 + 1536]
+
+          print("Old kernel size:", old_kernel_size)
+          print("New kernel size:", len(kernel))
+          print("Ramdisk size:", ramdisk_size)
+          print("Header size:", header_size)
+          print("Header version:", header_version)
+
+          if header_version != 4:
+              raise SystemExit(f"Expected boot header v4, got {header_version}")
+
+          if ramdisk_size != 0:
+              raise SystemExit(f"Expected ramdisk_size 0 for R945F boot.img, got {ramdisk_size}")
+
+          def pad(data: bytes, page=PAGE) -> bytes:
+              rem = len(data) % page
+              if rem:
+                  data += b"\x00" * (page - rem)
+              return data
+
+          hdr = bytearray()
+          hdr += b"ANDROID!"
+          hdr += struct.pack("<I", len(kernel))
+          hdr += struct.pack("<I", 0)
+          hdr += struct.pack("<I", os_version)
+          hdr += struct.pack("<I", 1584)
+          hdr += struct.pack("<4I", 0, 0, 0, 0)
+          hdr += struct.pack("<I", 4)
+          hdr += cmdline
+          hdr += struct.pack("<I", 0)
+
+          if len(hdr) != 1584:
+              raise SystemExit(f"Bad header size: {len(hdr)}")
+
+          img = bytes(hdr)
+          img = pad(img)
+          img += kernel
+          img = pad(img)
+          img += SEANDROID
+          img = pad(img)
+
+          if len(img) >= 50331648:
+              raise SystemExit(f"New boot image too large: {len(img)}")
+
+          out_path.write_bytes(img)
+          print("Wrote:", out_path)
+          print("Size:", out_path.stat().st_size)
+          print("Room left:", 50331648 - out_path.stat().st_size)
+          PY
+
+          python3 repack_boot_v4.py
 
       - name: Generate local AVB key and re-footer boot/init_boot
         run: |
@@ -634,7 +700,7 @@ jobs:
 
           mkdir -p avb_keys
 
-          openssl genrsa -out avb_keys/r945_local_avb.pem 4096
+          openssl genrsa -out avb_keys/r960_local_avb.pem 4096
 
           cp work/firmware/boot_resukisu_noavb.img work/firmware/boot.img
           cp work/firmware/init_boot.img work/firmware/init_boot_refooter.img
@@ -647,8 +713,8 @@ jobs:
             --partition_name boot \
             --partition_size 50331648 \
             --algorithm SHA256_RSA4096 \
-            --key avb_keys/r945_local_avb.pem \
-            --rollback_index 1032
+            --key avb_keys/r960_local_avb.pem \
+            --rollback_index 2
 
           echo "===== Re-footer init_boot.img with same local AVB key rollback index 2 ====="
           python3 avbtool.py erase_footer --image work/firmware/init_boot_refooter.img || true
@@ -658,8 +724,8 @@ jobs:
             --partition_name init_boot \
             --partition_size 16777216 \
             --algorithm SHA256_RSA4096 \
-            --key avb_keys/r945_local_avb.pem \
-            --rollback_index 1032
+            --key avb_keys/r960_local_avb.pem \
+            --rollback_index 2
 
           mv work/firmware/init_boot_refooter.img work/firmware/init_boot.img
 
@@ -676,11 +742,11 @@ jobs:
           python3 avbtool.py make_vbmeta_image \
             --output work/firmware/vbmeta.img \
             --algorithm SHA256_RSA4096 \
-            --key avb_keys/r945_local_avb.pem \
-            --rollback_index 1032 \
+            --key avb_keys/r960_local_avb.pem \
+            --rollback_index 2 \
             --flags 3 \
-            --prop com.android.build.boot.os_version:14 \
-            --prop com.android.build.boot.security_patch:2025-08-01 \
+            --prop com.android.build.boot.os_version:16 \
+            --prop com.android.build.boot.security_patch:2026-07-05 \
             --include_descriptors_from_image work/firmware/boot.img \
             --include_descriptors_from_image work/firmware/init_boot.img
 
@@ -697,26 +763,26 @@ jobs:
           cp work/firmware/init_boot.img final_ap/init_boot.img
           cp work/firmware/vbmeta.img final_ap/vbmeta.img
 
-          tar --format=ustar -cf dist/R945_ReSukiSU_Complete_AP.tar -C final_ap boot.img init_boot.img vbmeta.img
+          tar --format=posix -cf dist/AP_R945FXXS2CZF5_ReSukiSU.tar -C final_ap boot.img init_boot.img vbmeta.img
 
-          cp dist/R945_ReSukiSU_Complete_AP.tar dist/R945_ReSukiSU_Complete_AP.tar.md5
-          md5sum dist/R945_ReSukiSU_Complete_AP.tar >> dist/R945_ReSukiSU_Complete_AP.tar.md5
+          cp dist/AP_R945FXXS2CZF5_ReSukiSU.tar dist/AP_R945FXXS2CZF5_ReSukiSU.tar.md5
+          md5sum dist/AP_R945FXXS2CZF5_ReSukiSU.tar >> dist/AP_R945FXXS2CZF5_ReSukiSU.tar.md5
 
           sha256sum \
-            dist/Image-ReSukiSU-R945 \
+            dist/Image-ReSukiSU-R945F \
             dist/resukisu.config \
-            dist/R945_ReSukiSU_Complete_AP.tar \
-            dist/R945_ReSukiSU_Complete_AP.tar.md5 \
+            dist/AP_R945FXXS2CZF5_ReSukiSU.tar \
+            dist/AP_R945FXXS2CZF5_ReSukiSU.tar.md5 \
             > dist/SHA256SUMS.txt
 
           cat > dist/RELEASE_NOTES.txt <<'EOF'
-          SM-R945 Galaxy Watch6 LTE ReSukiSU Complete AP
+          SM-R945F Galaxy Watch6 Classic ReSukiSU Complete AP
 
           Target firmware:
-          - R945FXXS1BYH1
-          - Android 14
-          - Security patch 2025-08-01
-          - Rollback index 1032
+          - R945FXXS2CZF5
+          - Android 16
+          - Security patch 2026-07-05
+          - Rollback index 2
 
           Package contents:
           - boot.img
@@ -733,7 +799,7 @@ jobs:
           - locally signed AVB footers and vbmeta flags 3
 
           Flash only after bootloader unlock.
-          This AP tar is for SM-R945 R945FXXS1BYH1 only.
+          This AP tar is for SM-R945F R945FXXS2CZF5 only.
           EOF
 
           echo "===== DIST FILES ====="
@@ -742,17 +808,14 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: r945-resukisu-complete-ap-${{ github.run_number }}
-          name: SM-R945 ReSukiSU Complete AP ${{ github.run_number }}
+          tag_name: r945f-resukisu-complete-ap-${{ github.run_number }}
+          name: SM-R945F ReSukiSU Complete AP ${{ github.run_number }}
           body_path: dist/RELEASE_NOTES.txt
           files: |
-            dist/R945_ReSukiSU_Complete_AP.tar
-            dist/R945_ReSukiSU_Complete_AP.tar.md5
-            dist/Image-ReSukiSU-R945
+            dist/AP_R945FXXS2CZF5_ReSukiSU.tar
+            dist/AP_R945FXXS2CZF5_ReSukiSU.tar.md5
+            dist/Image-ReSukiSU-R945F
             dist/resukisu.config
             dist/SHA256SUMS.txt
             dist/RELEASE_NOTES.txt
-
-
-
 
